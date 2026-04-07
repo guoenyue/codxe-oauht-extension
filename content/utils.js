@@ -13,7 +13,7 @@ const SCRIPT_SOURCE = (() => {
 })();
 
 const LOG_PREFIX = `[MultiPage:${SCRIPT_SOURCE}]`;
-const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
+const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 let flowStopped = false;
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -50,14 +50,14 @@ function waitForElement(selector, timeout = 10000) {
 
     const existing = document.querySelector(selector);
     if (existing) {
-      console.log(LOG_PREFIX, `Found immediately: ${selector}`);
-      log(`Found element: ${selector}`);
+      console.log(LOG_PREFIX, `立即找到元素: ${selector}`);
+      log(`已找到元素：${selector}`);
       resolve(existing);
       return;
     }
 
-    console.log(LOG_PREFIX, `Waiting for: ${selector} (timeout: ${timeout}ms)`);
-    log(`Waiting for selector: ${selector}...`);
+    console.log(LOG_PREFIX, `等待元素: ${selector}（超时 ${timeout}ms）`);
+    log(`正在等待选择器：${selector}...`);
 
     let settled = false;
     let stopTimer = null;
@@ -78,8 +78,8 @@ function waitForElement(selector, timeout = 10000) {
       const el = document.querySelector(selector);
       if (el) {
         cleanup();
-        console.log(LOG_PREFIX, `Found after wait: ${selector}`);
-        log(`Found element: ${selector}`);
+        console.log(LOG_PREFIX, `等待后找到元素: ${selector}`);
+        log(`已找到元素：${selector}`);
         resolve(el);
       }
     });
@@ -91,7 +91,7 @@ function waitForElement(selector, timeout = 10000) {
 
     const timer = setTimeout(() => {
       cleanup();
-      const msg = `Timeout waiting for ${selector} after ${timeout}ms on ${location.href}`;
+      const msg = `在 ${location.href} 等待 ${selector} 超时，已超过 ${timeout}ms`;
       console.error(LOG_PREFIX, msg);
       reject(new Error(msg));
     }, timeout);
@@ -132,14 +132,14 @@ function waitForElementByText(containerSelector, textPattern, timeout = 10000) {
 
     const existing = search();
     if (existing) {
-      console.log(LOG_PREFIX, `Found by text immediately: ${containerSelector} matching ${textPattern}`);
-      log(`Found element by text: ${textPattern}`);
+      console.log(LOG_PREFIX, `立即按文本找到元素: ${containerSelector} 匹配 ${textPattern}`);
+      log(`已按文本找到元素：${textPattern}`);
       resolve(existing);
       return;
     }
 
-    console.log(LOG_PREFIX, `Waiting for text match: ${containerSelector} / ${textPattern}`);
-    log(`Waiting for element with text: ${textPattern}...`);
+    console.log(LOG_PREFIX, `等待文本匹配: ${containerSelector} / ${textPattern}`);
+    log(`正在等待包含文本的元素：${textPattern}...`);
 
     let settled = false;
     let stopTimer = null;
@@ -160,8 +160,8 @@ function waitForElementByText(containerSelector, textPattern, timeout = 10000) {
       const el = search();
       if (el) {
         cleanup();
-        console.log(LOG_PREFIX, `Found by text after wait: ${textPattern}`);
-        log(`Found element by text: ${textPattern}`);
+        console.log(LOG_PREFIX, `等待后按文本找到元素: ${textPattern}`);
+        log(`已按文本找到元素：${textPattern}`);
         resolve(el);
       }
     });
@@ -173,7 +173,7 @@ function waitForElementByText(containerSelector, textPattern, timeout = 10000) {
 
     const timer = setTimeout(() => {
       cleanup();
-      const msg = `Timeout waiting for text "${textPattern}" in "${containerSelector}" after ${timeout}ms on ${location.href}`;
+      const msg = `在 ${location.href} 的 ${containerSelector} 中等待文本 "${textPattern}" 超时，已超过 ${timeout}ms`;
       console.error(LOG_PREFIX, msg);
       reject(new Error(msg));
     }, timeout);
@@ -206,8 +206,8 @@ function fillInput(el, value) {
   nativeInputValueSetter.call(el, value);
   el.dispatchEvent(new Event('input', { bubbles: true }));
   el.dispatchEvent(new Event('change', { bubbles: true }));
-  console.log(LOG_PREFIX, `Filled input ${el.name || el.id || el.type} with: ${value}`);
-  log(`Filled input [${el.name || el.id || el.type || 'unknown'}]`);
+  console.log(LOG_PREFIX, `已填写输入框 ${el.name || el.id || el.type}: ${value}`);
+  log(`已填写输入框 [${el.name || el.id || el.type || '未知'}]`);
 }
 
 /**
@@ -219,8 +219,8 @@ function fillSelect(el, value) {
   throwIfStopped();
   el.value = value;
   el.dispatchEvent(new Event('change', { bubbles: true }));
-  console.log(LOG_PREFIX, `Selected value ${value} in ${el.name || el.id}`);
-  log(`Selected [${el.name || el.id || 'unknown'}] = ${value}`);
+  console.log(LOG_PREFIX, `已在 ${el.name || el.id} 中选择值: ${value}`);
+  log(`已选择 [${el.name || el.id || '未知'}] = ${value}`);
 }
 
 /**
@@ -242,7 +242,7 @@ function log(message, level = 'info') {
  * Report that this content script is loaded and ready.
  */
 function reportReady() {
-  console.log(LOG_PREFIX, 'Content script ready');
+  console.log(LOG_PREFIX, '内容脚本已就绪');
   chrome.runtime.sendMessage({
     type: 'CONTENT_SCRIPT_READY',
     source: SCRIPT_SOURCE,
@@ -258,8 +258,8 @@ function reportReady() {
  * @param {Object} data - Step output data
  */
 function reportComplete(step, data = {}) {
-  console.log(LOG_PREFIX, `Step ${step} completed`, data);
-  log(`Step ${step} completed successfully`, 'ok');
+  console.log(LOG_PREFIX, `步骤 ${step} 已完成`, data);
+  log(`步骤 ${step} 已成功完成`, 'ok');
   chrome.runtime.sendMessage({
     type: 'STEP_COMPLETE',
     source: SCRIPT_SOURCE,
@@ -275,8 +275,8 @@ function reportComplete(step, data = {}) {
  * @param {string} errorMessage
  */
 function reportError(step, errorMessage) {
-  console.error(LOG_PREFIX, `Step ${step} failed: ${errorMessage}`);
-  log(`Step ${step} failed: ${errorMessage}`, 'error');
+  console.error(LOG_PREFIX, `步骤 ${step} 失败: ${errorMessage}`);
+  log(`步骤 ${step} 失败：${errorMessage}`, 'error');
   chrome.runtime.sendMessage({
     type: 'STEP_ERROR',
     source: SCRIPT_SOURCE,
@@ -293,8 +293,8 @@ function reportError(step, errorMessage) {
 function simulateClick(el) {
   throwIfStopped();
   el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-  console.log(LOG_PREFIX, `Clicked: ${el.tagName} ${el.textContent?.slice(0, 30) || ''}`);
-  log(`Clicked [${el.tagName}] "${el.textContent?.trim().slice(0, 30) || ''}"`);
+  console.log(LOG_PREFIX, `已点击: ${el.tagName} ${el.textContent?.slice(0, 30) || ''}`);
+  log(`已点击 [${el.tagName}] "${el.textContent?.trim().slice(0, 30) || ''}"`);
 }
 
 /**

@@ -33,7 +33,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true });
     }).catch(err => {
       if (isStopError(err)) {
-        log(`Step ${message.step}: Stopped by user.`, 'warn');
+        log(`步骤 ${message.step}：已被用户停止。`, 'warn');
         sendResponse({ stopped: true, error: err.message });
         return;
       }
@@ -46,65 +46,199 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleStep(step, payload) {
   switch (step) {
-    case 1: return await step1_getOAuthLink();
+    case 1: return await step1_getOAuthLink(payload);
     case 9: return await step9_vpsVerify(payload);
     default:
-      throw new Error(`vps-panel.js does not handle step ${step}`);
+      throw new Error(`vps-panel.js 不处理步骤 ${step}`);
   }
+}
+
+function isVisibleElement(el) {
+  if (!el) return false;
+  const style = window.getComputedStyle(el);
+  const rect = el.getBoundingClientRect();
+  return style.display !== 'none'
+    && style.visibility !== 'hidden'
+    && rect.width > 0
+    && rect.height > 0;
+}
+
+function getActionText(el) {
+  return [
+    el?.textContent,
+    el?.value,
+    el?.getAttribute?.('aria-label'),
+    el?.getAttribute?.('title'),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findManagementKeyInput() {
+  const candidates = document.querySelectorAll(
+    '.LoginPage-module__loginCard___OgP-R input[type="password"], input[placeholder*="管理密钥"], input[aria-label*="管理密钥"]'
+  );
+  return Array.from(candidates).find(isVisibleElement) || null;
+}
+
+function findManagementLoginButton() {
+  const candidates = document.querySelectorAll('.LoginPage-module__loginCard___OgP-R button, .LoginPage-module__loginCard___OgP-R .btn');
+  return Array.from(candidates).find((el) => {
+    if (!isVisibleElement(el)) return false;
+    return /登录|login/i.test(getActionText(el));
+  }) || null;
+}
+
+function findRememberPasswordCheckbox() {
+  const candidates = document.querySelectorAll('.LoginPage-module__loginCard___OgP-R input[type="checkbox"]');
+  return Array.from(candidates).find((el) => {
+    const label = el.closest('label');
+    const text = getActionText(label || el);
+    return /记住密码|remember/i.test(text);
+  }) || null;
+}
+
+function findOAuthNavLink() {
+  const candidates = document.querySelectorAll('a[href*="#/oauth"], a.nav-item, button, [role="link"], [role="button"]');
+  return Array.from(candidates).find((el) => {
+    if (!isVisibleElement(el)) return false;
+    const text = getActionText(el);
+    const href = el.getAttribute('href') || '';
+    return href.includes('#/oauth') || /oauth/i.test(text);
+  }) || null;
+}
+
+function findCodexOAuthHeader() {
+  const candidates = document.querySelectorAll('.card-header, [class*="cardHeader"], .card, [class*="card"]');
+  return Array.from(candidates).find((el) => {
+    if (!isVisibleElement(el)) return false;
+    const text = (el.textContent || '').toLowerCase();
+    return text.includes('codex') && text.includes('oauth');
+  }) || null;
+}
+
+function findOAuthCardLoginButton(header) {
+  const card = header?.closest('.card, [class*="card"]') || header?.parentElement || document;
+  const candidates = card.querySelectorAll('button.btn.btn-primary, button.btn-primary, button.btn');
+  return Array.from(candidates).find((el) => isVisibleElement(el) && /登录|login/i.test(getActionText(el))) || null;
+}
+
+function findAuthUrlElement() {
+  const candidates = document.querySelectorAll('[class*="authUrlValue"], .OAuthPage-module__authUrlValue___axvUJ');
+  return Array.from(candidates).find((el) => isVisibleElement(el) && /^https?:\/\//i.test((el.textContent || '').trim())) || null;
+}
+
+async function ensureOAuthManagementPage(vpsPassword, step = 1, timeout = 45000) {
+  const start = Date.now();
+  let lastLoginAttemptAt = 0;
+  let lastOauthNavAttemptAt = 0;
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const authUrlEl = findAuthUrlElement();
+    if (authUrlEl) {
+      return { header: findCodexOAuthHeader(), authUrlEl };
+    }
+
+    const oauthHeader = findCodexOAuthHeader();
+    if (oauthHeader) {
+      return { header: oauthHeader, authUrlEl: null };
+    }
+
+    const managementKeyInput = findManagementKeyInput();
+    const managementLoginButton = findManagementLoginButton();
+    if (managementKeyInput && managementLoginButton) {
+      if (!vpsPassword) {
+        throw new Error('VPS 面板需要管理密钥，请先在侧边栏填写 VPS Key（管理密钥）。');
+      }
+
+      if ((managementKeyInput.value || '') !== vpsPassword) {
+        await humanPause(350, 900);
+        fillInput(managementKeyInput, vpsPassword);
+        log(`步骤 ${step}：已填写 VPS 管理密钥。`);
+      }
+
+      const rememberCheckbox = findRememberPasswordCheckbox();
+      if (rememberCheckbox && !rememberCheckbox.checked) {
+        simulateClick(rememberCheckbox);
+        log(`步骤 ${step}：已勾选 VPS 面板“记住密码”。`);
+        await sleep(300);
+      }
+
+      if (Date.now() - lastLoginAttemptAt > 3000) {
+        lastLoginAttemptAt = Date.now();
+        await humanPause(350, 900);
+        simulateClick(managementLoginButton);
+        log(`步骤 ${step}：已提交 VPS 管理登录。`);
+      }
+
+      await sleep(1500);
+      continue;
+    }
+
+    const oauthNavLink = findOAuthNavLink();
+    if (oauthNavLink && Date.now() - lastOauthNavAttemptAt > 2000) {
+      lastOauthNavAttemptAt = Date.now();
+      await humanPause(300, 800);
+      simulateClick(oauthNavLink);
+      log(`步骤 ${step}：已打开“OAuth 登录”导航。`);
+      await sleep(1200);
+      continue;
+    }
+
+    await sleep(250);
+  }
+
+  throw new Error('无法进入 VPS 的 OAuth 管理页面，请检查面板是否正常加载。URL: ' + location.href);
 }
 
 // ============================================================
 // Step 1: Get OAuth Link
 // ============================================================
 
-async function step1_getOAuthLink() {
-  log('Step 1: Waiting for VPS panel to load (auto-login may take a moment)...');
+async function step1_getOAuthLink(payload) {
+  const { vpsPassword } = payload || {};
 
-  // The page may start at #/login and auto-redirect to #/oauth.
-  // Wait for the Codex OAuth card to appear (up to 30s for auto-login + redirect).
-  let loginBtn = null;
-  try {
-    // Wait for any card-header containing "Codex" to appear
-    const header = await waitForElementByText('.card-header', /codex/i, 30000);
-    loginBtn = header.querySelector('button.btn.btn-primary, button.btn');
-    log('Step 1: Found Codex OAuth card');
-  } catch {
-    throw new Error(
-      'Codex OAuth card did not appear after 30s. Page may still be loading or not logged in. ' +
-      'Current URL: ' + location.href
-    );
-  }
+  log('步骤 1：正在等待 VPS 面板加载并进入 OAuth 页面...');
 
-  if (!loginBtn) {
-    throw new Error('Found Codex OAuth card but no login button inside it. URL: ' + location.href);
-  }
+  const { header, authUrlEl: existingAuthUrlEl } = await ensureOAuthManagementPage(vpsPassword, 1);
+  let authUrlEl = existingAuthUrlEl;
 
-  // Check if button is disabled (already clicked / loading)
-  if (loginBtn.disabled) {
-    log('Step 1: Login button is disabled (already loading), waiting for auth URL...');
+  if (!authUrlEl) {
+    const loginBtn = findOAuthCardLoginButton(header);
+    if (!loginBtn) {
+      throw new Error('已找到 Codex OAuth 卡片，但卡片内没有登录按钮。URL: ' + location.href);
+    }
+
+    if (loginBtn.disabled) {
+      log('步骤 1：OAuth 登录按钮当前不可用，正在等待授权链接出现...');
+    } else {
+      await humanPause(500, 1400);
+      simulateClick(loginBtn);
+      log('步骤 1：已点击 OAuth 登录按钮，正在等待授权链接...');
+    }
+
+    try {
+      authUrlEl = await waitForElement('[class*="authUrlValue"]', 15000);
+    } catch {
+      throw new Error(
+        '点击 OAuth 登录按钮后未出现授权链接。' +
+        '请检查 VPS 面板服务是否正在运行。URL: ' + location.href
+      );
+    }
   } else {
-    await humanPause(500, 1400);
-    simulateClick(loginBtn);
-    log('Step 1: Clicked login button, waiting for auth URL...');
-  }
-
-  // Wait for the auth URL to appear in the specific div
-  let authUrlEl = null;
-  try {
-    authUrlEl = await waitForElement('[class*="authUrlValue"]', 15000);
-  } catch {
-    throw new Error(
-      'Auth URL did not appear after clicking login. ' +
-      'Check if VPS panel is logged in and Codex service is running. URL: ' + location.href
-    );
+    log('步骤 1：VPS 面板上已显示授权链接。');
   }
 
   const oauthUrl = (authUrlEl.textContent || '').trim();
   if (!oauthUrl || !oauthUrl.startsWith('http')) {
-    throw new Error(`Invalid OAuth URL found: "${oauthUrl.slice(0, 50)}". Expected URL starting with http.`);
+    throw new Error(`拿到的 OAuth 链接无效：\"${oauthUrl.slice(0, 50)}\"。应为 http 开头的 URL。`);
   }
 
-  log(`Step 1: OAuth URL obtained: ${oauthUrl.slice(0, 80)}...`, 'ok');
+  log(`步骤 1：已获取 OAuth 链接：${oauthUrl.slice(0, 80)}...`, 'ok');
   reportComplete(1, { oauthUrl });
 }
 
@@ -113,19 +247,21 @@ async function step1_getOAuthLink() {
 // ============================================================
 
 async function step9_vpsVerify(payload) {
+  await ensureOAuthManagementPage(payload?.vpsPassword, 9);
+
   // Get localhostUrl from payload (passed directly by background) or fallback to state
   let localhostUrl = payload?.localhostUrl;
   if (!localhostUrl) {
-    log('Step 9: localhostUrl not in payload, fetching from state...');
+    log('步骤 9：payload 中没有 localhostUrl，正在从状态中读取...');
     const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
     localhostUrl = state.localhostUrl;
   }
   if (!localhostUrl) {
-    throw new Error('No localhost URL found. Complete step 8 first.');
+    throw new Error('未找到 localhost 回调地址，请先完成步骤 8。');
   }
-  log(`Step 9: Got localhostUrl: ${localhostUrl.slice(0, 60)}...`);
+  log(`步骤 9：已获取 localhostUrl：${localhostUrl.slice(0, 60)}...`);
 
-  log('Step 9: Looking for callback URL input...');
+  log('步骤 9：正在查找回调地址输入框...');
 
   // Find the callback URL input
   // Actual DOM: <input class="input" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
@@ -136,13 +272,13 @@ async function step9_vpsVerify(payload) {
     try {
       urlInput = await waitForElement('input[placeholder*="localhost"]', 5000);
     } catch {
-      throw new Error('Could not find callback URL input on VPS panel. URL: ' + location.href);
+      throw new Error('在 VPS 面板中未找到回调地址输入框。URL: ' + location.href);
     }
   }
 
   await humanPause(600, 1500);
   fillInput(urlInput, localhostUrl);
-  log(`Step 9: Filled callback URL: ${localhostUrl.slice(0, 80)}...`);
+  log(`步骤 9：已填写回调地址：${localhostUrl.slice(0, 80)}...`);
 
   // Find and click "提交回调 URL" button
   let submitBtn = null;
@@ -156,26 +292,26 @@ async function step9_vpsVerify(payload) {
     try {
       submitBtn = await waitForElementByText('button.btn', /提交回调/, 5000);
     } catch {
-      throw new Error('Could not find "提交回调 URL" button. URL: ' + location.href);
+      throw new Error('未找到“提交回调 URL”按钮。URL: ' + location.href);
     }
   }
 
   await humanPause(450, 1200);
   simulateClick(submitBtn);
-  log('Step 9: Clicked "提交回调 URL", waiting for authentication result...');
+  log('步骤 9：已点击“提交回调 URL”，正在等待认证结果...');
 
   // Wait for "认证成功！" status badge to appear
   try {
     await waitForElementByText('.status-badge, [class*="status"]', /认证成功/, 30000);
-    log('Step 9: Authentication successful!', 'ok');
+    log('步骤 9：认证成功！', 'ok');
   } catch {
     // Check if there's an error message instead
     const statusEl = document.querySelector('.status-badge, [class*="status"]');
     const statusText = statusEl ? statusEl.textContent : 'unknown';
     if (/成功|success/i.test(statusText)) {
-      log('Step 9: Authentication successful!', 'ok');
+      log('步骤 9：认证成功！', 'ok');
     } else {
-      log(`Step 9: Status after submit: "${statusText}". May still be processing.`, 'warn');
+      log(`步骤 9：提交后的状态为“${statusText}”，可能仍在处理中。`, 'warn');
     }
   }
 

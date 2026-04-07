@@ -27,11 +27,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse(result);
     }).catch(err => {
       if (isStopError(err)) {
-        log(`Step ${message.step}: Stopped by user.`, 'warn');
+        log(`步骤 ${message.step}：已被用户停止。`, 'warn');
         sendResponse({ stopped: true, error: err.message });
         return;
       }
-      reportError(message.step, err.message);
+      log(`步骤 ${message.step}：邮箱轮询失败：${err.message}`, 'warn');
       sendResponse({ error: err.message });
     });
     return true; // async response
@@ -55,28 +55,29 @@ function getCurrentMailIds() {
 // ============================================================
 
 async function handlePollEmail(step, payload) {
-  const { senderFilters, subjectFilters, maxAttempts, intervalMs } = payload;
+  const { senderFilters, subjectFilters, maxAttempts, intervalMs, excludeCodes = [] } = payload;
+  const excludedCodeSet = new Set(excludeCodes.filter(Boolean));
 
-  log(`Step ${step}: Starting email poll (max ${maxAttempts} attempts, every ${intervalMs / 1000}s)`);
+  log(`步骤 ${step}：开始轮询邮箱（最多 ${maxAttempts} 次，每 ${intervalMs / 1000} 秒一次）`);
 
   // Wait for mail list to load
   try {
     await waitForElement('.mail-list-page-item', 10000);
-    log(`Step ${step}: Mail list loaded`);
+    log(`步骤 ${step}：邮件列表已加载`);
   } catch {
-    throw new Error('Mail list did not load. Make sure QQ Mail inbox is open.');
+    throw new Error('邮件列表未加载完成，请确认 QQ 邮箱已打开收件箱。');
   }
 
   // Step 1: Snapshot existing mail IDs BEFORE we start waiting for new email
   const existingMailIds = getCurrentMailIds();
-  log(`Step ${step}: Snapshotted ${existingMailIds.size} existing emails as "old"`);
+  log(`步骤 ${step}：已将当前 ${existingMailIds.size} 封邮件标记为旧邮件快照`);
 
   // Fallback after just 3 attempts (~10s). In practice, the email is usually
   // already in the list but has the same mailid (page was already open).
   const FALLBACK_AFTER = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    log(`Polling QQ Mail... attempt ${attempt}/${maxAttempts}`);
+    log(`步骤 ${step}：正在轮询 QQ 邮箱，第 ${attempt}/${maxAttempts} 次`);
 
     // Refresh inbox (skip on first attempt, list is fresh)
     if (attempt > 1) {
@@ -104,15 +105,19 @@ async function handlePollEmail(step, payload) {
       if (senderMatch || subjectMatch) {
         const code = extractVerificationCode(subject + ' ' + digest);
         if (code) {
-          const source = useFallback && existingMailIds.has(mailId) ? 'fallback-first-match' : 'new';
-          log(`Step ${step}: Code found: ${code} (${source}, subject: ${subject.slice(0, 40)})`, 'ok');
+          if (excludedCodeSet.has(code)) {
+            log(`步骤 ${step}：跳过排除的验证码：${code}`, 'info');
+            continue;
+          }
+          const source = useFallback && existingMailIds.has(mailId) ? '回退首封匹配邮件' : '新邮件';
+          log(`步骤 ${step}：已找到验证码：${code}（来源：${source}，主题：${subject.slice(0, 40)}）`, 'ok');
           return { ok: true, code, emailTimestamp: Date.now(), mailId };
         }
       }
     }
 
     if (attempt === FALLBACK_AFTER + 1) {
-      log(`Step ${step}: No new emails after ${FALLBACK_AFTER} attempts, falling back to first matching email`, 'warn');
+      log(`步骤 ${step}：连续 ${FALLBACK_AFTER} 次未发现新邮件，开始回退到首封匹配邮件`, 'warn');
     }
 
     if (attempt < maxAttempts) {
@@ -121,8 +126,8 @@ async function handlePollEmail(step, payload) {
   }
 
   throw new Error(
-    `No new matching email found after ${(maxAttempts * intervalMs / 1000).toFixed(0)}s. ` +
-    'Check QQ Mail manually. Email may be delayed or in spam folder.'
+    `${(maxAttempts * intervalMs / 1000).toFixed(0)} 秒后仍未找到新的匹配邮件。` +
+    '请手动检查 QQ 邮箱，邮件可能延迟到达或进入垃圾箱。'
   );
 }
 

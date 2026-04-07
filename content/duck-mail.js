@@ -10,7 +10,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse(result);
   }).catch(err => {
     if (isStopError(err)) {
-      log('Duck Mail: Stopped by user.', 'warn');
+      log('Duck 邮箱：已被用户停止。', 'warn');
       sendResponse({ stopped: true, error: err.message });
       return;
     }
@@ -23,7 +23,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function fetchDuckEmail(payload = {}) {
   const { generateNew = true } = payload;
 
-  log(`Duck Mail: ${generateNew ? 'Generating' : 'Reading'} private address...`);
+  log(`Duck 邮箱：正在${generateNew ? '生成' : '读取'}私有地址...`);
 
   await waitForElement(
     'input.AutofillSettingsPanel__PrivateDuckAddressValue, button.AutofillSettingsPanel__GeneratorButton',
@@ -46,12 +46,12 @@ async function fetchDuckEmail(payload = {}) {
       }
       await sleep(150);
     }
-    throw new Error('Timed out waiting for Duck address to appear.');
+    throw new Error('等待 Duck 地址出现超时。');
   };
 
   const currentEmail = readEmail();
   if (currentEmail && !generateNew) {
-    log(`Duck Mail: Found existing address ${currentEmail}`);
+    log(`Duck 邮箱：已发现现有地址 ${currentEmail}`);
     return { email: currentEmail, generated: false };
   }
 
@@ -59,16 +59,16 @@ async function fetchDuckEmail(payload = {}) {
   const generatorButton = getGeneratorButton();
   if (!generatorButton) {
     if (currentEmail) {
-      log(`Duck Mail: Reusing existing address ${currentEmail}`, 'warn');
+      log(`Duck 邮箱：正在复用现有地址 ${currentEmail}`, 'warn');
       return { email: currentEmail, generated: false };
     }
-    throw new Error('Could not find "Generate Private Duck Address" button.');
+    throw new Error('未找到“生成 Duck 私有地址”按钮。');
   }
 
   generatorButton.click();
-  log('Duck Mail: Clicked "Generate Private Duck Address"');
+  log('Duck 邮箱：已点击“生成 Duck 私有地址”按钮');
 
   const nextEmail = await waitForEmailValue(currentEmail);
-  log(`Duck Mail: Ready address ${nextEmail}`, 'ok');
+  log(`Duck 邮箱：地址已就绪 ${nextEmail}`, 'ok');
   return { email: nextEmail, generated: true };
 }

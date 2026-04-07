@@ -5,19 +5,25 @@ console.log('[MultiPage:signup-page] Content script loaded on', location.href);
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK') {
+  if (
+    message.type === 'EXECUTE_STEP'
+    || message.type === 'FILL_CODE'
+    || message.type === 'STEP8_FIND_AND_CLICK'
+    || message.type === 'PREPARE_LOGIN_CODE'
+    || message.type === 'RESEND_VERIFICATION_CODE'
+  ) {
     resetStopState();
     handleCommand(message).then((result) => {
       sendResponse({ ok: true, ...(result || {}) });
     }).catch(err => {
       if (isStopError(err)) {
-        log(`Step ${message.step || 8}: Stopped by user.`, 'warn');
+        log(`步骤 ${message.step || 8}：已被用户停止。`, 'warn');
         sendResponse({ stopped: true, error: err.message });
         return;
       }
 
       if (message.type === 'STEP8_FIND_AND_CLICK') {
-        log(`Step 8: ${err.message}`, 'error');
+        log(`步骤 8：${err.message}`, 'error');
         sendResponse({ error: err.message });
         return;
       }
@@ -38,14 +44,204 @@ async function handleCommand(message) {
         case 5: return await step5_fillNameBirthday(message.payload);
         case 6: return await step6_login(message.payload);
         case 8: return await step8_findAndClick();
-        default: throw new Error(`signup-page.js does not handle step ${message.step}`);
+        default: throw new Error(`signup-page.js 不处理步骤 ${message.step}`);
       }
     case 'FILL_CODE':
       // Step 4 = signup code, Step 7 = login code (same handler)
       return await fillVerificationCode(message.step, message.payload);
+    case 'PREPARE_LOGIN_CODE':
+      return await prepareLoginCodeFlow();
+    case 'RESEND_VERIFICATION_CODE':
+      return await resendVerificationCode(message.step);
     case 'STEP8_FIND_AND_CLICK':
       return await step8_findAndClick();
   }
+}
+
+const VERIFICATION_CODE_INPUT_SELECTOR = [
+  'input[name="code"]',
+  'input[name="otp"]',
+  'input[autocomplete="one-time-code"]',
+  'input[type="text"][maxlength="6"]',
+  'input[type="tel"][maxlength="6"]',
+  'input[aria-label*="code" i]',
+  'input[placeholder*="code" i]',
+  'input[inputmode="numeric"]',
+].join(', ');
+
+const ONE_TIME_CODE_LOGIN_PATTERN = /使用一次性验证码登录|改用(?:一次性)?验证码(?:登录)?|使用验证码登录|一次性验证码|验证码登录|one[-\s]*time\s*(?:passcode|password|code)|use\s+(?:a\s+)?one[-\s]*time\s*(?:passcode|password|code)(?:\s+instead)?|use\s+(?:a\s+)?code(?:\s+instead)?|sign\s+in\s+with\s+(?:email|code)|email\s+(?:me\s+)?(?:a\s+)?code/i;
+
+const RESEND_VERIFICATION_CODE_PATTERN = /重新发送(?:验证码)?|再次发送(?:验证码)?|重发(?:验证码)?|未收到(?:验证码|邮件)|resend(?:\s+code)?|send\s+(?:a\s+)?new\s+code|send\s+(?:it\s+)?again|request\s+(?:a\s+)?new\s+code|didn'?t\s+receive/i;
+
+function isVisibleElement(el) {
+  if (!el) return false;
+  const style = window.getComputedStyle(el);
+  const rect = el.getBoundingClientRect();
+  return style.display !== 'none'
+    && style.visibility !== 'hidden'
+    && rect.width > 0
+    && rect.height > 0;
+}
+
+function getVerificationCodeTarget() {
+  const codeInput = document.querySelector(VERIFICATION_CODE_INPUT_SELECTOR);
+  if (codeInput && isVisibleElement(codeInput)) {
+    return { type: 'single', element: codeInput };
+  }
+
+  const singleInputs = Array.from(document.querySelectorAll('input[maxlength="1"]'))
+    .filter(isVisibleElement);
+  if (singleInputs.length >= 6) {
+    return { type: 'split', elements: singleInputs };
+  }
+
+  return null;
+}
+
+function getActionText(el) {
+  return [
+    el?.textContent,
+    el?.value,
+    el?.getAttribute?.('aria-label'),
+    el?.getAttribute?.('title'),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isActionEnabled(el) {
+  return Boolean(el)
+    && !el.disabled
+    && el.getAttribute('aria-disabled') !== 'true';
+}
+
+function findOneTimeCodeLoginTrigger() {
+  const candidates = document.querySelectorAll(
+    'button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"]'
+  );
+
+  for (const el of candidates) {
+    if (!isVisibleElement(el)) continue;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+
+    const text = [
+      el.textContent,
+      el.value,
+      el.getAttribute('aria-label'),
+      el.getAttribute('title'),
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (text && ONE_TIME_CODE_LOGIN_PATTERN.test(text)) {
+      return el;
+    }
+  }
+
+  return null;
+}
+
+function findResendVerificationCodeTrigger({ allowDisabled = false } = {}) {
+  const candidates = document.querySelectorAll(
+    'button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"]'
+  );
+
+  for (const el of candidates) {
+    if (!isVisibleElement(el)) continue;
+    if (!allowDisabled && !isActionEnabled(el)) continue;
+
+    const text = getActionText(el);
+    if (text && RESEND_VERIFICATION_CODE_PATTERN.test(text)) {
+      return el;
+    }
+  }
+
+  return null;
+}
+
+async function prepareLoginCodeFlow(timeout = 15000) {
+  const readyTarget = getVerificationCodeTarget();
+  if (readyTarget) {
+    log('步骤 7：验证码输入框已就绪。');
+    return { ready: true, mode: readyTarget.type };
+  }
+
+  const start = Date.now();
+  let switchClickCount = 0;
+  let lastSwitchAttemptAt = 0;
+  let loggedPasswordPage = false;
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const target = getVerificationCodeTarget();
+    if (target) {
+      log('步骤 7：验证码页面已就绪。');
+      return { ready: true, mode: target.type };
+    }
+
+    const passwordInput = document.querySelector('input[type="password"]');
+    const switchTrigger = findOneTimeCodeLoginTrigger();
+
+    if (switchTrigger && (switchClickCount === 0 || Date.now() - lastSwitchAttemptAt > 1500)) {
+      switchClickCount += 1;
+      lastSwitchAttemptAt = Date.now();
+      loggedPasswordPage = false;
+      log('步骤 7：检测到密码页，正在切换到一次性验证码登录...');
+      await humanPause(350, 900);
+      simulateClick(switchTrigger);
+      await sleep(1200);
+      continue;
+    }
+
+    if (passwordInput && !loggedPasswordPage) {
+      loggedPasswordPage = true;
+      log('步骤 7：正在等待密码页上的一次性验证码登录入口...');
+    }
+
+    await sleep(200);
+  }
+
+  throw new Error('无法切换到一次性验证码验证页面。URL: ' + location.href);
+}
+
+async function resendVerificationCode(step, timeout = 45000) {
+  if (step === 7) {
+    await prepareLoginCodeFlow();
+  }
+
+  const start = Date.now();
+  let action = null;
+  let loggedWaiting = false;
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+    action = findResendVerificationCodeTrigger({ allowDisabled: true });
+
+    if (action && isActionEnabled(action)) {
+      log(`步骤 ${step}：重新发送验证码按钮已可用。`);
+      await humanPause(350, 900);
+      simulateClick(action);
+      await sleep(1200);
+      return {
+        resent: true,
+        buttonText: getActionText(action),
+      };
+    }
+
+    if (action && !loggedWaiting) {
+      loggedWaiting = true;
+      log(`步骤 ${step}：正在等待重新发送验证码按钮变为可点击...`);
+    }
+
+    await sleep(250);
+  }
+
+  throw new Error('无法点击重新发送验证码按钮。URL: ' + location.href);
 }
 
 // ============================================================
@@ -53,7 +249,7 @@ async function handleCommand(message) {
 // ============================================================
 
 async function step2_clickRegister() {
-  log('Step 2: Looking for Register/Sign up button...');
+  log('步骤 2：正在查找注册按钮...');
 
   let registerBtn = null;
   try {
@@ -68,8 +264,8 @@ async function step2_clickRegister() {
       registerBtn = await waitForElement('a[href*="signup"], a[href*="register"]', 5000);
     } catch {
       throw new Error(
-        'Could not find Register/Sign up button. ' +
-        'Check auth page DOM in DevTools. URL: ' + location.href
+        '未找到注册按钮。' +
+        '请在 DevTools 中检查认证页面 DOM。URL: ' + location.href
       );
     }
   }
@@ -77,7 +273,7 @@ async function step2_clickRegister() {
   await humanPause(450, 1200);
   reportComplete(2);
   simulateClick(registerBtn);
-  log('Step 2: Clicked Register button');
+  log('步骤 2：已点击注册按钮');
 }
 
 // ============================================================
@@ -86,9 +282,9 @@ async function step2_clickRegister() {
 
 async function step3_fillEmailPassword(payload) {
   const { email } = payload;
-  if (!email) throw new Error('No email provided. Paste email in Side Panel first.');
+  if (!email) throw new Error('未提供邮箱地址，请先在侧边栏粘贴邮箱。');
 
-  log(`Step 3: Filling email: ${email}`);
+  log(`步骤 3：正在填写邮箱：${email}`);
 
   // Find email input
   let emailInput = null;
@@ -98,40 +294,40 @@ async function step3_fillEmailPassword(payload) {
       10000
     );
   } catch {
-    throw new Error('Could not find email input field on signup page. URL: ' + location.href);
+    throw new Error('在注册页未找到邮箱输入框。URL: ' + location.href);
   }
 
   await humanPause(500, 1400);
   fillInput(emailInput, email);
-  log('Step 3: Email filled');
+  log('步骤 3：邮箱已填写');
 
   // Check if password field is on the same page
   let passwordInput = document.querySelector('input[type="password"]');
 
   if (!passwordInput) {
     // Need to submit email first to get to password page
-    log('Step 3: No password field yet, submitting email first...');
+    log('步骤 3：暂未发现密码输入框，先提交邮箱...');
     const submitBtn = document.querySelector('button[type="submit"]')
       || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 5000).catch(() => null);
 
     if (submitBtn) {
       await humanPause(400, 1100);
       simulateClick(submitBtn);
-      log('Step 3: Submitted email, waiting for password field...');
+      log('步骤 3：邮箱已提交，正在等待密码输入框...');
       await sleep(2000);
     }
 
     try {
       passwordInput = await waitForElement('input[type="password"]', 10000);
     } catch {
-      throw new Error('Could not find password input after submitting email. URL: ' + location.href);
+      throw new Error('提交邮箱后仍未找到密码输入框。URL: ' + location.href);
     }
   }
 
-  if (!payload.password) throw new Error('No password provided. Step 3 requires a generated password.');
+  if (!payload.password) throw new Error('未提供密码，步骤 3 需要可用密码。');
   await humanPause(600, 1500);
   fillInput(passwordInput, payload.password);
-  log('Step 3: Password filled');
+  log('步骤 3：密码已填写');
 
   // Report complete BEFORE submit, because submit causes page navigation
   // which kills the content script connection
@@ -145,7 +341,7 @@ async function step3_fillEmailPassword(payload) {
   if (submitBtn) {
     await humanPause(500, 1300);
     simulateClick(submitBtn);
-    log('Step 3: Form submitted');
+    log('步骤 3：表单已提交');
   }
 }
 
@@ -153,40 +349,177 @@ async function step3_fillEmailPassword(payload) {
 // Fill Verification Code (used by step 4 and step 7)
 // ============================================================
 
+const INVALID_VERIFICATION_CODE_PATTERN = /代码不正确|验证码不正确|验证码错误|code\s+(?:is\s+)?incorrect|invalid\s+code|incorrect\s+code|try\s+again/i;
+const VERIFICATION_PAGE_PATTERN = /检查您的收件箱|输入我们刚刚向|重新发送电子邮件|重新发送验证码|验证码|代码不正确|email\s+verification/i;
+const OAUTH_CONSENT_PAGE_PATTERN = /使用\s*ChatGPT\s*登录到\s*Codex|login\s+to\s+codex|log\s+in\s+to\s+codex|authorize|授权/i;
+const ADD_PHONE_PAGE_PATTERN = /add[\s-]*phone|添加手机号|手机号码|手机号|phone\s+number|telephone/i;
+
+function getVerificationErrorText() {
+  const messages = [];
+  const selectors = [
+    '.react-aria-FieldError',
+    '[slot="errorMessage"]',
+    '[id$="-error"]',
+    '[data-invalid="true"] + *',
+    '[aria-invalid="true"] + *',
+    '[class*="error"]',
+  ];
+
+  for (const selector of selectors) {
+    document.querySelectorAll(selector).forEach((el) => {
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) {
+        messages.push(text);
+      }
+    });
+  }
+
+  const invalidInput = document.querySelector(`${VERIFICATION_CODE_INPUT_SELECTOR}[aria-invalid="true"], ${VERIFICATION_CODE_INPUT_SELECTOR}[data-invalid="true"]`);
+  if (invalidInput) {
+    const wrapper = invalidInput.closest('form, [data-rac], ._root_18qcl_51, div');
+    if (wrapper) {
+      const text = (wrapper.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) {
+        messages.push(text);
+      }
+    }
+  }
+
+  return messages.find((text) => INVALID_VERIFICATION_CODE_PATTERN.test(text)) || '';
+}
+
+function isStep5Ready() {
+  return Boolean(
+    document.querySelector('input[name="name"], input[autocomplete="name"], input[name="birthday"], input[name="age"], [role="spinbutton"][data-type="year"]')
+  );
+}
+
+function getPageTextSnapshot() {
+  return (document.body?.innerText || document.body?.textContent || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getPrimaryContinueButton() {
+  const continueBtn = document.querySelector(
+    'button[type="submit"][data-dd-action-name="Continue"], button[type="submit"]._primary_3rdp0_107'
+  );
+  if (continueBtn && isVisibleElement(continueBtn)) {
+    return continueBtn;
+  }
+
+  const buttons = document.querySelectorAll('button, [role="button"]');
+  return Array.from(buttons).find((el) => isVisibleElement(el) && /继续|Continue/i.test(el.textContent || '')) || null;
+}
+
+function isVerificationPageStillVisible() {
+  if (getVerificationCodeTarget()) return true;
+  if (findResendVerificationCodeTrigger({ allowDisabled: true })) return true;
+  if (document.querySelector('form[action*="email-verification" i]')) return true;
+
+  return VERIFICATION_PAGE_PATTERN.test(getPageTextSnapshot());
+}
+
+function isAddPhonePageReady() {
+  const path = `${location.pathname || ''} ${location.href || ''}`;
+  if (/\/add-phone(?:[/?#]|$)/i.test(path)) return true;
+
+  const phoneInput = document.querySelector(
+    'input[type="tel"]:not([maxlength="6"]), input[name*="phone" i], input[id*="phone" i], input[autocomplete="tel"]'
+  );
+  if (phoneInput && isVisibleElement(phoneInput)) {
+    return true;
+  }
+
+  return ADD_PHONE_PAGE_PATTERN.test(getPageTextSnapshot());
+}
+
+function isStep8Ready() {
+  const continueBtn = getPrimaryContinueButton();
+  if (!continueBtn) return false;
+  if (isVerificationPageStillVisible()) return false;
+  if (isAddPhonePageReady()) return false;
+
+  return OAUTH_CONSENT_PAGE_PATTERN.test(getPageTextSnapshot());
+}
+
+async function waitForVerificationSubmitOutcome(step, timeout) {
+  const resolvedTimeout = timeout ?? (step === 7 ? 30000 : 12000);
+  const start = Date.now();
+
+  while (Date.now() - start < resolvedTimeout) {
+    throwIfStopped();
+
+    const errorText = getVerificationErrorText();
+    if (errorText) {
+      return { invalidCode: true, errorText };
+    }
+
+    if (step === 4 && isStep5Ready()) {
+      return { success: true };
+    }
+
+    if (step === 7 && isStep8Ready()) {
+      return { success: true };
+    }
+
+    if (step === 7 && isAddPhonePageReady()) {
+      return { success: true, addPhonePage: true };
+    }
+
+    await sleep(150);
+  }
+
+  if (isVerificationPageStillVisible()) {
+    return {
+      invalidCode: true,
+      errorText: getVerificationErrorText() || '提交后仍停留在验证码页面，准备重新发送验证码。',
+    };
+  }
+
+  return { success: true, assumed: true };
+}
+
 async function fillVerificationCode(step, payload) {
   const { code } = payload;
-  if (!code) throw new Error('No verification code provided.');
+  if (!code) throw new Error('未提供验证码。');
 
-  log(`Step ${step}: Filling verification code: ${code}`);
+  log(`步骤 ${step}：正在填写验证码：${code}`);
+
+  if (step === 7) {
+    await prepareLoginCodeFlow();
+  }
 
   // Find code input — could be a single input or multiple separate inputs
   let codeInput = null;
   try {
-    codeInput = await waitForElement(
-      'input[name="code"], input[name="otp"], input[type="text"][maxlength="6"], input[aria-label*="code"], input[placeholder*="code"], input[placeholder*="Code"], input[inputmode="numeric"]',
-      10000
-    );
+    codeInput = await waitForElement(VERIFICATION_CODE_INPUT_SELECTOR, 10000);
   } catch {
     // Check for multiple single-digit inputs (common pattern)
     const singleInputs = document.querySelectorAll('input[maxlength="1"]');
     if (singleInputs.length >= 6) {
-      log(`Step ${step}: Found single-digit code inputs, filling individually...`);
+      log(`步骤 ${step}：发现分开的单字符验证码输入框，正在逐个填写...`);
       for (let i = 0; i < 6 && i < singleInputs.length; i++) {
         fillInput(singleInputs[i], code[i]);
         await sleep(100);
       }
-      await sleep(1000);
-      reportComplete(step);
-      return;
+      const outcome = await waitForVerificationSubmitOutcome(step);
+      if (outcome.invalidCode) {
+        log(`步骤 ${step}：验证码被拒绝：${outcome.errorText}`, 'warn');
+      } else if (outcome.addPhonePage) {
+        log(`步骤 ${step}：验证码已通过，并已跳转到手机号页面。`, 'ok');
+      } else {
+        log(`步骤 ${step}：验证码已通过${outcome.assumed ? '（按成功推定）' : ''}。`, 'ok');
+      }
+      return outcome;
     }
-    throw new Error('Could not find verification code input. URL: ' + location.href);
+    throw new Error('未找到验证码输入框。URL: ' + location.href);
   }
 
   fillInput(codeInput, code);
-  log(`Step ${step}: Code filled`);
+  log(`步骤 ${step}：验证码已填写`);
 
   // Report complete BEFORE submit (page may navigate away)
-  reportComplete(step);
 
   // Submit
   await sleep(500);
@@ -196,8 +529,19 @@ async function fillVerificationCode(step, payload) {
   if (submitBtn) {
     await humanPause(450, 1200);
     simulateClick(submitBtn);
-    log(`Step ${step}: Verification submitted`);
+    log(`步骤 ${step}：验证码已提交`);
   }
+
+  const outcome = await waitForVerificationSubmitOutcome(step);
+  if (outcome.invalidCode) {
+    log(`步骤 ${step}：验证码被拒绝：${outcome.errorText}`, 'warn');
+  } else if (outcome.addPhonePage) {
+    log(`步骤 ${step}：验证码已通过，并已跳转到手机号页面。`, 'ok');
+  } else {
+    log(`步骤 ${step}：验证码已通过${outcome.assumed ? '（按成功推定）' : ''}。`, 'ok');
+  }
+
+  return outcome;
 }
 
 // ============================================================
@@ -206,9 +550,9 @@ async function fillVerificationCode(step, payload) {
 
 async function step6_login(payload) {
   const { email, password } = payload;
-  if (!email) throw new Error('No email provided for login.');
+  if (!email) throw new Error('登录时缺少邮箱地址。');
 
-  log(`Step 6: Logging in with ${email}...`);
+  log(`步骤 6：正在使用 ${email} 登录...`);
 
   // Wait for email input on the auth page
   let emailInput = null;
@@ -218,12 +562,12 @@ async function step6_login(payload) {
       15000
     );
   } catch {
-    throw new Error('Could not find email input on login page. URL: ' + location.href);
+    throw new Error('在登录页未找到邮箱输入框。URL: ' + location.href);
   }
 
   await humanPause(500, 1400);
   fillInput(emailInput, email);
-  log('Step 6: Email filled');
+  log('步骤 6：邮箱已填写');
 
   // Submit email
   await sleep(500);
@@ -232,7 +576,7 @@ async function step6_login(payload) {
   if (submitBtn1) {
     await humanPause(400, 1100);
     simulateClick(submitBtn1);
-    log('Step 6: Submitted email');
+    log('步骤 6：邮箱已提交');
   }
 
   await sleep(2000);
@@ -240,7 +584,7 @@ async function step6_login(payload) {
   // Check for password field
   const passwordInput = document.querySelector('input[type="password"]');
   if (passwordInput) {
-    log('Step 6: Password field found, filling password...');
+    log('步骤 6：已找到密码输入框，正在填写密码...');
     await humanPause(550, 1450);
     fillInput(passwordInput, password);
 
@@ -253,13 +597,13 @@ async function step6_login(payload) {
     if (submitBtn2) {
       await humanPause(450, 1200);
       simulateClick(submitBtn2);
-      log('Step 6: Submitted password, may need verification code (step 7)');
+      log('步骤 6：密码已提交，可能还需要验证码（步骤 7）');
     }
     return;
   }
 
   // No password field — OTP flow
-  log('Step 6: No password field. OTP flow or auto-redirect.');
+  log('步骤 6：未发现密码输入框，可能进入验证码流程或自动跳转。');
   reportComplete(6, { needsOTP: true });
 }
 
@@ -271,7 +615,7 @@ async function step6_login(payload) {
 // Background performs the actual click through the debugger Input API.
 
 async function step8_findAndClick() {
-  log('Step 8: Looking for OAuth consent "继续" button...');
+  log('步骤 8：正在查找 OAuth 同意页的“继续”按钮...');
 
   const continueBtn = await findContinueButton();
   await waitForButtonEnabled(continueBtn);
@@ -282,7 +626,7 @@ async function step8_findAndClick() {
   await sleep(250);
 
   const rect = getSerializableRect(continueBtn);
-  log('Step 8: Found "继续" button and prepared debugger click coordinates.');
+  log('步骤 8：已找到“继续”按钮并准备好调试器点击坐标。');
   return {
     rect,
     buttonText: (continueBtn.textContent || '').trim(),
@@ -291,18 +635,20 @@ async function step8_findAndClick() {
 }
 
 async function findContinueButton() {
-  try {
-    return await waitForElement(
-      'button[type="submit"][data-dd-action-name="Continue"], button[type="submit"]._primary_3rdp0_107',
-      10000
-    );
-  } catch {
-    try {
-      return await waitForElementByText('button', /继续|Continue/, 5000);
-    } catch {
-      throw new Error('Could not find "继续" button on OAuth consent page. URL: ' + location.href);
+  const start = Date.now();
+  while (Date.now() - start < 10000) {
+    throwIfStopped();
+    if (isAddPhonePageReady()) {
+      throw new Error('当前页面已进入手机号页面，不是 OAuth 授权同意页。URL: ' + location.href);
     }
+    const button = getPrimaryContinueButton();
+    if (button && isStep8Ready()) {
+      return button;
+    }
+    await sleep(150);
   }
+
+  throw new Error('在 OAuth 同意页未找到“继续”按钮，或页面尚未进入授权同意状态。URL: ' + location.href);
 }
 
 async function waitForButtonEnabled(button, timeout = 8000) {
@@ -312,7 +658,7 @@ async function waitForButtonEnabled(button, timeout = 8000) {
     if (isButtonEnabled(button)) return;
     await sleep(150);
   }
-  throw new Error('"继续" button stayed disabled for too long. URL: ' + location.href);
+  throw new Error('“继续”按钮长时间不可点击。URL: ' + location.href);
 }
 
 function isButtonEnabled(button) {
@@ -324,7 +670,7 @@ function isButtonEnabled(button) {
 function getSerializableRect(el) {
   const rect = el.getBoundingClientRect();
   if (!rect.width || !rect.height) {
-    throw new Error('"继续" button has no clickable size after scrolling. URL: ' + location.href);
+    throw new Error('滚动后“继续”按钮没有可点击尺寸。URL: ' + location.href);
   }
 
   return {
@@ -343,16 +689,16 @@ function getSerializableRect(el) {
 
 async function step5_fillNameBirthday(payload) {
   const { firstName, lastName, age, year, month, day } = payload;
-  if (!firstName || !lastName) throw new Error('No name data provided.');
+  if (!firstName || !lastName) throw new Error('未提供姓名数据。');
 
   const resolvedAge = age ?? (year ? new Date().getFullYear() - Number(year) : null);
   const hasBirthdayData = [year, month, day].every(value => value != null && !Number.isNaN(Number(value)));
   if (!hasBirthdayData && (resolvedAge == null || Number.isNaN(Number(resolvedAge)))) {
-    throw new Error('No birthday or age data provided.');
+    throw new Error('未提供生日或年龄数据。');
   }
 
   const fullName = `${firstName} ${lastName}`;
-  log(`Step 5: Filling name: ${fullName}`);
+  log(`步骤 5：正在填写姓名：${fullName}`);
 
   // Actual DOM structure:
   // - Full name: <input name="name" placeholder="全名" type="text">
@@ -367,11 +713,11 @@ async function step5_fillNameBirthday(payload) {
       10000
     );
   } catch {
-    throw new Error('Could not find name input. URL: ' + location.href);
+    throw new Error('未找到姓名输入框。URL: ' + location.href);
   }
   await humanPause(500, 1300);
   fillInput(nameInput, fullName);
-  log(`Step 5: Name filled: ${fullName}`);
+  log(`步骤 5：姓名已填写：${fullName}`);
 
   let birthdayMode = false;
   let ageInput = null;
@@ -393,7 +739,7 @@ async function step5_fillNameBirthday(payload) {
 
   if (birthdayMode) {
     if (!hasBirthdayData) {
-      throw new Error('Birthday field detected, but no birthday data provided.');
+      throw new Error('检测到生日字段，但未提供生日数据。');
     }
 
     const yearSpinner = document.querySelector('[role="spinbutton"][data-type="year"]');
@@ -401,7 +747,7 @@ async function step5_fillNameBirthday(payload) {
     const daySpinner = document.querySelector('[role="spinbutton"][data-type="day"]');
 
     if (yearSpinner && monthSpinner && daySpinner) {
-      log('Step 5: Birthday fields detected, filling birthday...');
+      log('步骤 5：检测到生日字段，正在填写生日...');
 
       async function setSpinButton(el, value) {
         el.focus();
@@ -429,7 +775,7 @@ async function step5_fillNameBirthday(payload) {
       await setSpinButton(monthSpinner, String(month).padStart(2, '0'));
       await humanPause(250, 650);
       await setSpinButton(daySpinner, String(day).padStart(2, '0'));
-      log(`Step 5: Birthday filled: ${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+      log(`步骤 5：生日已填写：${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
     }
 
     const hiddenBirthday = document.querySelector('input[name="birthday"]');
@@ -437,17 +783,17 @@ async function step5_fillNameBirthday(payload) {
       const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       hiddenBirthday.value = dateStr;
       hiddenBirthday.dispatchEvent(new Event('change', { bubbles: true }));
-      log(`Step 5: Hidden birthday input set: ${dateStr}`);
+      log(`步骤 5：已设置隐藏生日输入框：${dateStr}`);
     }
   } else if (ageInput) {
     if (resolvedAge == null || Number.isNaN(Number(resolvedAge))) {
-      throw new Error('Age field detected, but no age data provided.');
+      throw new Error('检测到年龄字段，但未提供年龄数据。');
     }
     await humanPause(500, 1300);
     fillInput(ageInput, String(resolvedAge));
-    log(`Step 5: Age filled: ${resolvedAge}`);
+    log(`步骤 5：年龄已填写：${resolvedAge}`);
   } else {
-    throw new Error('Could not find birthday or age input. URL: ' + location.href);
+    throw new Error('未找到生日或年龄输入项。URL: ' + location.href);
   }
 
   // Click "完成帐户创建" button
@@ -461,6 +807,6 @@ async function step5_fillNameBirthday(payload) {
   if (completeBtn) {
     await humanPause(500, 1300);
     simulateClick(completeBtn);
-    log('Step 5: Clicked "完成帐户创建"');
+    log('步骤 5：已点击“完成帐户创建”');
   }
 }

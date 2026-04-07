@@ -244,6 +244,10 @@ header {
   gap: 8px;
 }
 
+.data-check-row {
+  align-items: flex-start;
+}
+
 .data-inline {
   display: flex;
   align-items: center;
@@ -322,6 +326,25 @@ header {
 }
 .data-select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
 [data-theme="dark"] .data-select { color-scheme: dark; }
+
+.data-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.data-check input[type="checkbox"] {
+  margin-top: 2px;
+  accent-color: var(--blue);
+  cursor: pointer;
+  flex-shrink: 0;
+}
 
 /* Status Bar */
 .status-bar {
