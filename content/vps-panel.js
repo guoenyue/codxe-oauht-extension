@@ -76,6 +76,27 @@ function getActionText(el) {
     .trim();
 }
 
+function parseUrlSafely(rawUrl) {
+  if (!rawUrl) return null;
+  try {
+    return new URL(rawUrl);
+  } catch {
+    return null;
+  }
+}
+
+function isLocalhostOAuthCallbackUrl(rawUrl) {
+  const parsed = parseUrlSafely(rawUrl);
+  if (!parsed) return false;
+  if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+  if (parsed.hostname !== 'localhost') return false;
+  if (parsed.pathname !== '/auth/callback') return false;
+
+  const code = (parsed.searchParams.get('code') || '').trim();
+  const state = (parsed.searchParams.get('state') || '').trim();
+  return Boolean(code && state);
+}
+
 function getStatusBadgeElement() {
   const selectors = [
     '#root > div > div > div > main > div > div > div > div > div:nth-child(1) > div > div.OAuthPage-module__cardContent___1sXLA > div.status-badge',
@@ -290,18 +311,24 @@ async function step1_getOAuthLink(payload) {
 }
 
 // ============================================================
-// Step 9: CPA Verify — paste localhost URL and submit
+// 步骤 9：CPA 回调验证——填写 localhost 回调地址并提交
 // ============================================================
 
 async function step9_vpsVerify(payload) {
   await ensureOAuthManagementPage(payload?.vpsPassword, 9);
 
-  // Get localhostUrl from payload (passed directly by background) or fallback to state
+  // 优先从 payload 读取 localhostUrl；没有时再回退到全局状态
   let localhostUrl = payload?.localhostUrl;
+  if (localhostUrl && !isLocalhostOAuthCallbackUrl(localhostUrl)) {
+    throw new Error('步骤 9 只接受真实的 localhost OAuth 回调地址，请重新执行步骤 8。');
+  }
   if (!localhostUrl) {
     log('步骤 9：payload 中没有 localhostUrl，正在从状态中读取...');
     const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
     localhostUrl = state.localhostUrl;
+    if (localhostUrl && !isLocalhostOAuthCallbackUrl(localhostUrl)) {
+      throw new Error('步骤 9 只接受真实的 localhost OAuth 回调地址，请重新执行步骤 8。');
+    }
   }
   if (!localhostUrl) {
     throw new Error('未找到 localhost 回调地址，请先完成步骤 8。');

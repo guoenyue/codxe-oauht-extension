@@ -242,6 +242,12 @@ Step 3 使用的注册邮箱。
 
 ### Step 8: Manual OAuth Confirm
 
+严格回调捕获规则：
+
+- 步骤 8 现在只接受 `http(s)://localhost:<port>/auth/callback?code=...&state=...`
+- 监听范围只限于当前 OAuth 认证标签页的主 frame 跳转
+- 普通 `localhost` 页面，包括本地部署的 CPA 面板，不会再被误判为回调地址
+
 虽然按钮名称还是 `Manual OAuth Confirm`，但当前代码已经做了自动尝试：
 
 - 在授权页定位“继续”按钮
@@ -258,6 +264,11 @@ Step 3 使用的注册邮箱。
 - README 中的按钮名称沿用了旧文案，但代码行为是“自动尝试点击”
 
 ### Step 9: CPA Verify
+
+校验规则：
+
+- 步骤 9 会拒绝任何不是真实 `/auth/callback`，或缺少 `code` / `state` 的 `localhostUrl`
+- 成功后的清理只会针对 `/auth` 这一类真实回调标签页，不会再泛化清理任意 localhost 路径
 
 回到 CPA 面板：
 
@@ -380,6 +391,12 @@ sidepanel/                 侧边栏 UI
 - 如果 Auto 处于暂停状态，点击该按钮会先确认是否接管 Auto
 
 ### 5. Step 8 失败时重点检查
+
+补充检查项：
+
+- 确认回调路径仍然是 `/auth/callback`
+- 确认回调 query 里仍然同时包含 `code` 和 `state`
+- 如果 CPA 部署在 `localhost`，确认当前看到的页面是真实 OAuth 回调，而不是 CPA 面板自身页面
 
 - OAuth 同意页 DOM 是否变化
 - “继续”按钮是否变成了别的文案

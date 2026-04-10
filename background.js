@@ -229,16 +229,23 @@ function is163MailHost(hostname = '') {
     || hostname === 'webmail.vip.163.com';
 }
 
-function buildLocalhostCleanupPrefix(rawUrl) {
+function isLocalhostOAuthCallbackUrl(rawUrl) {
   const parsed = parseUrlSafely(rawUrl);
-  if (!parsed || parsed.hostname !== 'localhost') return '';
+  if (!parsed) return false;
+  if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+  if (parsed.hostname !== 'localhost') return false;
+  if (parsed.pathname !== '/auth/callback') return false;
 
-  const segments = parsed.pathname.split('/').filter(Boolean);
-  if (!segments.length) {
-    return parsed.origin;
-  }
+  const code = (parsed.searchParams.get('code') || '').trim();
+  const state = (parsed.searchParams.get('state') || '').trim();
+  return Boolean(code && state);
+}
 
-  return `${parsed.origin}/${segments[0]}`;
+function buildLocalhostCleanupPrefix(rawUrl) {
+  if (!isLocalhostOAuthCallbackUrl(rawUrl)) return '';
+
+  const parsed = parseUrlSafely(rawUrl);
+  return parsed ? `${parsed.origin}/auth` : '';
 }
 
 function matchesSourceUrlFamily(source, candidateUrl, referenceUrl) {
@@ -261,7 +268,9 @@ function matchesSourceUrlFamily(source, candidateUrl, referenceUrl) {
         && candidate.origin === reference.origin
         && candidate.pathname.startsWith('/m/');
     case 'vps-panel':
-      return Boolean(reference) && candidate.origin === reference.origin;
+      return Boolean(reference)
+        && candidate.origin === reference.origin
+        && candidate.pathname === reference.pathname;
     default:
       return false;
   }
@@ -1126,6 +1135,9 @@ async function handleStepData(step, payload) {
       break;
     case 8:
       if (payload.localhostUrl) {
+        if (!isLocalhostOAuthCallbackUrl(payload.localhostUrl)) {
+          throw new Error('步骤 8 返回了无效的 localhost OAuth 回调地址。');
+        }
         await setState({ localhostUrl: payload.localhostUrl });
         broadcastDataUpdate({ localhostUrl: payload.localhostUrl });
       }
@@ -2252,7 +2264,7 @@ async function executeStep7(state) {
 }
 
 // ============================================================
-// Step 8: Complete OAuth (auto click + localhost listener)
+// Step 8: 完成 OAuth（自动点击 + localhost 回调监听）
 // ============================================================
 
 let webNavListener = null;
@@ -2264,13 +2276,10 @@ async function executeStep8(state) {
 
   await addLog('步骤 8：正在监听 localhost 回调地址...');
 
-  // Register webNavigation listener (scoped to this step)
+  // 只在当前步骤内注册 webNavigation 监听
   return new Promise((resolve, reject) => {
     let resolved = false;
-    let resolveCaptureWait = null;
-    const captureWait = new Promise((resolveCapture) => {
-      resolveCaptureWait = resolveCapture;
-    });
+    let signupTabId = null;
 
     const cleanupListener = () => {
       if (webNavListener) {
@@ -2285,31 +2294,29 @@ async function executeStep8(state) {
     }, 120000);
 
     webNavListener = (details) => {
-      if (details.url.startsWith('http://localhost')) {
-        console.log(LOG_PREFIX, `Captured localhost redirect: ${details.url}`);
+      if (resolved || !signupTabId) return;
+      if (details.tabId !== signupTabId) return;
+      if (details.frameId !== 0) return;
+      if (isLocalhostOAuthCallbackUrl(details.url)) {
+        console.log(LOG_PREFIX, `已捕获 localhost OAuth 回调：${details.url}`);
         resolved = true;
         cleanupListener();
         clearTimeout(timeout);
-        if (resolveCaptureWait) resolveCaptureWait(details.url);
-
-        setState({ localhostUrl: details.url }).then(() => {
+        completeStepFromBackground(8, { localhostUrl: details.url }).then(() => {
           addLog(`步骤 8：已捕获 localhost 地址：${details.url}`, 'ok');
-          setStepStatus(8, 'completed');
-          notifyStepComplete(8, { localhostUrl: details.url });
-          broadcastDataUpdate({ localhostUrl: details.url });
           resolve();
+        }).catch((err) => {
+          reject(err);
         });
       }
     };
 
-    chrome.webNavigation.onBeforeNavigate.addListener(webNavListener);
 
-    // After step 7, the auth page shows a consent screen ("使用 ChatGPT 登录到 Codex")
-    // with a "继续" button. We locate the button in-page, then click it through
-    // the debugger Input API directly.
+    // 步骤 7 之后，认证页会进入 OAuth 同意页，出现“继续”按钮。
+    // 这里先在页面内定位按钮，再通过 debugger 输入事件发起点击。
     (async () => {
       try {
-        let signupTabId = await getTabId('signup-page');
+        signupTabId = await getTabId('signup-page');
         if (signupTabId) {
           await chrome.tabs.update(signupTabId, { active: true });
           await addLog('步骤 8：已切回认证页，正在准备调试器点击...');
@@ -2317,6 +2324,8 @@ async function executeStep8(state) {
           signupTabId = await reuseOrCreateTab('signup-page', state.oauthUrl);
           await addLog('步骤 8：已重新打开认证页，正在准备调试器点击...');
         }
+
+        chrome.webNavigation.onBeforeNavigate.addListener(webNavListener);
 
         const clickResult = await sendToContentScript('signup-page', {
           type: 'STEP8_FIND_AND_CLICK',
@@ -2342,10 +2351,13 @@ async function executeStep8(state) {
 }
 
 // ============================================================
-// Step 9: VPS Verify (via vps-panel.js)
+// Step 9: CPA 回调验证（通过 vps-panel.js）
 // ============================================================
 
 async function executeStep9(state) {
+  if (state.localhostUrl && !isLocalhostOAuthCallbackUrl(state.localhostUrl)) {
+    throw new Error('步骤 8 捕获到的 localhost OAuth 回调地址无效，请重新执行步骤 8。');
+  }
   if (!state.localhostUrl) {
     throw new Error('缺少 localhost 回调地址，请先完成步骤 8。');
   }
